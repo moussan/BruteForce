@@ -1,64 +1,91 @@
 import itertools
 import time
-from datetime import timedelta
+import hashlib
+import random
 from multiprocessing import Pool
 
-# Helper function to format time in years, months, days, hours, minutes, and seconds
-def format_time(seconds):
-    years, seconds = divmod(seconds, 31_536_000)  # 1 year = 31,536,000 seconds
-    months, seconds = divmod(seconds, 2_592_000)  # 1 month = 2,592,000 seconds
-    days, seconds = divmod(seconds, 86_400)       # 1 day = 86,400 seconds
-    hours, seconds = divmod(seconds, 3_600)       # 1 hour = 3,600 seconds
-    minutes, seconds = divmod(seconds, 60)        # 1 minute = 60 seconds
-    return f"{int(years)}y {int(months)}mo {int(days)}d {int(hours)}h {int(minutes)}m {int(seconds)}s"
+# Predefined character sets for better efficiency
+CHAR_SETS = {
+    "digits": "0123456789",
+    "lowercase": "abcdefghijklmnopqrstuvwxyz",
+    "uppercase": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "special": "!@#$%^&*()_+-=[]{}|;':\",.<>?/\\",
+    "all": ''.join(chr(i) for i in range(32, 127))  # Default: Printable ASCII
+}
 
-# Function to calculate estimated time
+# Function to dynamically benchmark CPU performance
+# This estimates the number of password attempts per second
+
+def benchmark_guesses(chars, length=6, duration=5):
+    """
+    Estimates the number of guesses per second by hashing random guesses
+    for a set duration. The results will help in calculating estimated time.
+    """
+    start_time = time.time()
+    guesses = 0
+    while time.time() - start_time < duration:
+        _ = hashlib.sha256(''.join(random.choices(chars, k=length)).encode()).hexdigest()
+        guesses += 1
+    return guesses // duration  # Returns average guesses per second
+
+
+def format_time(seconds):
+    """Formats time into days, hours, minutes, and seconds."""
+    days, seconds = divmod(seconds, 86_400)  # 1 day = 86,400 seconds
+    hours, seconds = divmod(seconds, 3_600)  # 1 hour = 3,600 seconds
+    minutes, seconds = divmod(seconds, 60)   # 1 minute = 60 seconds
+    return f"{int(days)}d {int(hours)}h {int(minutes)}m {int(seconds)}s"
+
+
 def calculate_estimated_time(chars, min_length, max_length, guesses_per_second):
+    """Calculates the estimated time required to brute-force a password."""
     total_combinations = sum(len(chars) ** length for length in range(min_length, max_length + 1))
     estimated_seconds = total_combinations / guesses_per_second
     return format_time(estimated_seconds), f"{total_combinations:,}", f"{total_combinations:.2e}"
 
-# Worker function for parallel processing
-def worker(args):
-    password, chars, length, start_index, end_index = args
-    for guess in itertools.product(chars, repeat=length):
-        if start_index <= end_index:
-            guess_str = ''.join(guess)
-            if guess_str == password:
-                return guess_str
-        start_index += 1
-    return None
 
-# Brute force function using CPU with parallel processing
-def brute_force_attack(password, min_length, max_length, chars, guesses_per_second):
+def brute_force_worker(password, guess):
+    """Worker function to compare a generated guess against the password."""
+    return ''.join(guess) if ''.join(guess) == password else None
+
+
+def brute_force_attack(password, min_length, max_length, chars):
+    """
+    Uses multiprocessing to distribute brute-force attack attempts efficiently.
+    """
     total_combinations = sum(len(chars) ** length for length in range(min_length, max_length + 1))
     attempts = 0
     start_time = time.time()
 
     with Pool() as pool:
         for length in range(min_length, max_length + 1):
-            num_workers = pool._processes
-            chunk_size = (len(chars) ** length) // num_workers
-            worker_args = [
-                (password, chars, length, i * chunk_size, (i + 1) * chunk_size)
-                for i in range(num_workers)
-            ]
-
-            results = pool.map(worker, worker_args)
-            for result in results:
+            guesses = itertools.product(chars, repeat=length)
+            for result in pool.imap_unordered(lambda g: brute_force_worker(password, g), guesses, chunksize=10000):
+                attempts += 1
                 if result:
-                    elapsed_time = time.time() - start_time
-                    return attempts, result, elapsed_time
+                    return attempts, result, time.time() - start_time
 
-            attempts += len(chars) ** length
+    return attempts, None, time.time() - start_time
 
-    elapsed_time = time.time() - start_time
-    return attempts, None, elapsed_time
 
-# Main menu
+def select_charset():
+    """Allows the user to select a character set for better efficiency."""
+    print("\nChoose character set:")
+    for i, (key, value) in enumerate(CHAR_SETS.items(), 1):
+        print(f"{i}. {key} ({len(value)} characters)")
+    
+    try:
+        choice = int(input("Enter choice: ").strip())
+        return CHAR_SETS.get(list(CHAR_SETS.keys())[choice - 1], CHAR_SETS["all"])
+    except (ValueError, IndexError):
+        print("Invalid choice. Using default character set.")
+        return CHAR_SETS["all"]
+
+
 def main():
-    print("Brute Force Password Cracker (CPU-Based)")
-    print("=========================================")
+    """Main menu for the Brute-Force Password Cracker."""
+    print("Brute Force Password Cracker (Optimized Version)")
+    print("==============================================")
 
     while True:
         print("\nMenu:")
@@ -67,10 +94,8 @@ def main():
         choice = input("Enter your choice: ")
 
         if choice == "1":
-            # Get password to crack
             password = input("Enter the password to attempt cracking: ")
-
-            # Get search space range
+            
             try:
                 min_length = int(input("Enter the minimum password length: "))
                 max_length = int(input("Enter the maximum password length: "))
@@ -81,24 +106,27 @@ def main():
                 print("Invalid input. Please enter numeric values.")
                 continue
 
-            # Define character set
-            chars = [chr(i) for i in range(32, 127)]  # Printable ASCII characters
+            # Allow user to select character set
+            chars = select_charset()
 
-            # Get CPU speed (dummy speed, update based on your system's benchmark)
-            cpu_guesses_per_second = 100_000  # Replace with your system's benchmark
+            # Benchmark system performance
+            print("\nBenchmarking system performance...")
+            cpu_guesses_per_second = benchmark_guesses(chars)
+            print(f"Estimated CPU speed: {cpu_guesses_per_second:,} guesses/sec")
 
-            # Calculate estimated time
+            # Calculate estimated cracking time
             estimated_time, total_combinations_formatted, total_combinations_scientific = calculate_estimated_time(
                 chars, min_length, max_length, cpu_guesses_per_second
             )
+
             print(f"\nEstimated cracking time: {estimated_time}")
             print(f"Total possible combinations: {total_combinations_formatted} ({total_combinations_scientific})")
 
-            # Ask if the user wants to proceed
+            # Ask for confirmation
             proceed = input("Do you want to proceed? (yes/no): ").strip().lower()
             if proceed == "yes":
                 print("\nStarting brute force attack...\n")
-                attempts, guess, elapsed_time = brute_force_attack(password, min_length, max_length, chars, cpu_guesses_per_second)
+                attempts, guess, elapsed_time = brute_force_attack(password, min_length, max_length, chars)
                 if guess:
                     print(f"\nPassword cracked in {attempts:,} attempts!")
                     print(f"The password is: {guess}")
@@ -107,11 +135,13 @@ def main():
                     print("\nFailed to crack the password.")
             else:
                 print("\nReturning to the main menu...")
+        
         elif choice == "2":
             print("Exiting...")
             break
         else:
             print("Invalid choice. Please try again.")
+
 
 if __name__ == "__main__":
     main()
